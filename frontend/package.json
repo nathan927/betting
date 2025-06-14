@@ -1,0 +1,55 @@
+{
+  "name": "betting-system-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@headlessui/react": "^1.7.18", // For Tremor, if needed directly
+    "@heroicons/react": "^2.1.1", // For Tremor, if needed directly
+    "@radix-ui/react-slot": "^1.0.2", // Example, if using ShadCN components alongside
+    "@react-google-maps/api": "^2.19.3", // If maps are used
+    "@tanstack/react-query": "^5.37.1",
+    "@tanstack/react-query-devtools": "^5.37.1",
+    "@tremor/react": "^3.17.2",
+    "axios": "^1.7.2",
+    "chart.js": "^4.4.3",
+    "class-variance-authority": "^0.7.0", // Example, if using ShadCN
+    "clsx": "^2.1.1",
+    "date-fns": "^3.6.0",
+    "framer-motion": "^11.0.6", // For animations
+    "lucide-react": "^0.379.0",
+    "next": "14.2.3",
+    "next-auth": "^4.24.7", // If using NextAuth
+    "next-themes": "^0.2.1", // For theme switching
+    "react": "^18.3.1",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "^7.51.0", // For forms
+    "react-hot-toast": "^2.4.1", // For notifications
+    "react-icons": "^5.0.1", // Alternative icons
+    "react-intersection-observer": "^9.8.1", // For scroll animations
+    "react-use-websocket": "^4.8.1",
+    "recharts": "^2.12.7", // Tremor uses this
+    "sharp": "^0.33.3", // Next.js image optimization
+    "tailwind-merge": "^2.3.0",
+    "zod": "^3.22.4", // For validation
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/forms": "^0.5.7",
+    "@types/node": "^20.12.12",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.19",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.3",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^5.4.5"
+  }
+}

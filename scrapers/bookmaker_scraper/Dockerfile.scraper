@@ -1,0 +1,11 @@
+# scrapers/bookmaker_scraper/Dockerfile.scraper
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# Install Playwright browsers
+RUN playwright install --with-deps chromium
+COPY scraper.py .
+COPY proxies.txt . # If proxies.txt is used by the scraper
+# Assuming the scraper is run as a script, e.g., python scraper.py
+CMD ["python", "scraper.py"]
