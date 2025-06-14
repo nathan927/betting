@@ -1,19 +1,10 @@
-aiohttp
-playwright
-aiolimiter
-redis
-fake-useragent
-# For Crypto used in scraper.py's AntiDetectionHelper example (if that code was actually used)
-# PyCryptodome is a common library for this.
-pycryptodome
-# cloudscraper # Was also in the example scraper
-cloudscraper
-# Other common scraping libraries
-# beautifulsoup4
-# lxml
-# requests
-# Ensure this matches imports in scrapers/bookmaker_scraper/scraper.py
-# Current scraper.py uses: aiohttp, asyncio, json, time, random, playwright, aiolimiter, redis, fake_useragent, logging, dataclasses, abc, hashlib, base64, Crypto, cloudscraper.
-# So, playwright, aiolimiter, redis, fake-useragent, pycryptodome (for Crypto), cloudscraper are key.
-# asyncio, json, time, random, logging, dataclasses, abc, hashlib, base64 are standard.
-# aiohttp is also used.
+aiohttp>=3.8.0
+playwright>=1.30.0
+aiolimiter>=1.0.0
+redis>=4.0.0
+fake-useragent>=1.0.0
+pycryptodome>=3.10.0
+cloudscraper>=1.2.0
+pandas>=1.3.0 # Included because it's imported, version is a common recent one
+gunicorn # For potentially serving a status API or control interface via Flask later
+python-dotenv # For managing environment variables if any script parameters are moved to .env
