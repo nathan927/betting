@@ -1,0 +1,827 @@
+# docker-compose.yml - 生產級 Docker Compose 配置
+version: '3.8'
+
+services:
+  # PostgreSQL with TimescaleDB
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: betting-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: betting_db
+      POSTGRES_USER: betting_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      TIMESCALEDB_TELEMETRY: off
+    secrets:
+      - db_password
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./init-scripts/:/docker-entrypoint-initdb.d/
+    ports:
+      - "5432:5432"
+    networks:
+      - betting-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U betting_user -d betting_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: betting-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    environment:
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - betting-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: betting-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: betting-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_COMPRESSION_TYPE: snappy
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "29092:29092"
+    networks:
+      - betting-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # Main API Server
+  betting-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: betting-api
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: betting_db
+      DB_USER: betting_user
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BROKERS: kafka:9092
+      PORT: 3000
+      WS_PORT: 8080
+    secrets:
+      - db_password
+      - redis_password
+      - jwt_secret
+      - jwt_refresh_secret
+      - encryption_key
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+    networks:
+      - betting-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      mode: replicated
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # Arbitrage Detection Service
+  arbitrage-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.arbitrage
+    container_name: betting-arbitrage
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - redis
+      - timescaledb
+    environment:
+      NODE_ENV: production
+      DB_HOST: timescaledb
+      REDIS_HOST: redis
+      KAFKA_BROKERS: kafka:9092
+    secrets:
+      - db_password
+      - redis_password
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ML Prediction Service
+  ml-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    container_name: betting-ml
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+      - redis
+    environment:
+      PYTHON_ENV: production
+      DB_HOST: timescaledb
+      REDIS_HOST: redis
+      MODEL_PATH: /app/models
+    secrets:
+      - db_password
+      - redis_password
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+  # Web Scraper Service
+  scraper-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.scraper
+    container_name: betting-scraper
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - kafka
+    environment:
+      PYTHON_ENV: production
+      REDIS_HOST: redis
+      KAFKA_BROKERS: kafka:9092
+      HEADLESS: 'true'
+    secrets:
+      - redis_password
+      - proxy_credentials
+    volumes:
+      - ./proxies.txt:/app/proxies.txt:ro
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # Monitoring Service
+  monitoring:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring
+    container_name: betting-monitoring
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+      - redis
+    environment:
+      NODE_ENV: production
+      DB_HOST: timescaledb
+      REDIS_HOST: redis
+      METRICS_PORT: 9090
+    secrets:
+      - db_password
+      - redis_password
+      - smtp_credentials
+      - slack_token
+    ports:
+      - "9090:9090"
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: betting-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: betting-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_password
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    secrets:
+      - grafana_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3001:3000"
+    networks:
+      - betting-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: betting-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - nginx_cache:/var/cache/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - betting-network
+    depends_on:
+      - betting-api
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+# 網絡配置
+networks:
+  betting-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# 數據卷
+volumes:
+  timescale_data:
+    driver: local
+  redis_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  zookeeper_logs:
+    driver: local
+  kafka_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  nginx_cache:
+    driver: local
+
+# 密鑰配置
+secrets:
+  db_password:
+    external: true
+  redis_password:
+    external: true
+  jwt_secret:
+    external: true
+  jwt_refresh_secret:
+    external: true
+  encryption_key:
+    external: true
+  grafana_password:
+    external: true
+  smtp_credentials:
+    external: true
+  slack_token:
+    external: true
+  proxy_credentials:
+    external: true
+
+---
+# Dockerfile - 主應用程式
+FROM node:18-alpine AS base
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# 依賴安裝階段
+FROM base AS deps
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+RUN cp -R node_modules prod_node_modules
+RUN npm ci && npm cache clean --force
+
+# 構建階段
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+
+# 生產階段
+FROM base AS production
+ENV NODE_ENV=production
+
+# 創建非 root 用戶
+RUN addgroup -g 1001 -S nodejs && adduser -S betting -u 1001
+
+# 複製必要文件
+COPY --from=deps --chown=betting:nodejs /app/prod_node_modules ./node_modules
+COPY --from=builder --chown=betting:nodejs /app/dist ./dist
+COPY --chown=betting:nodejs package*.json ./
+
+# 創建必要目錄
+RUN mkdir -p logs uploads && chown -R betting:nodejs logs uploads
+
+USER betting
+
+EXPOSE 3000 8080
+
+CMD ["node", "dist/server.js"]
+
+---
+# nginx/nginx.conf - Nginx 配置
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 2048;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # 日誌格式
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    'rt=$request_time uct="$upstream_connect_time" '
+                    'uht="$upstream_header_time" urt="$upstream_response_time"';
+
+    access_log /var/log/nginx/access.log main;
+
+    # 性能優化
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    client_max_body_size 20M;
+
+    # Gzip 壓縮
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml text/javascript 
+               application/json application/javascript application/xml+rss 
+               application/rss+xml application/atom+xml image/svg+xml;
+
+    # 安全頭
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # 限速配置
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=5r/m;
+    limit_conn_zone $binary_remote_addr zone=conn_limit:10m;
+
+    # 上游服務器
+    upstream betting_api {
+        least_conn;
+        server betting-api:3000 max_fails=3 fail_timeout=30s;
+        keepalive 32;
+    }
+
+    upstream betting_ws {
+        ip_hash;
+        server betting-api:8080;
+    }
+
+    # 緩存配置
+    proxy_cache_path /var/cache/nginx/api levels=1:2 keys_zone=api_cache:10m 
+                     max_size=1g inactive=60m use_temp_path=off;
+
+    # HTTP 到 HTTPS 重定向
+    server {
+        listen 80;
+        server_name betting-system.com www.betting-system.com;
+        return 301 https://$server_name$request_uri;
+    }
+
+    # HTTPS 服務器
+    server {
+        listen 443 ssl http2;
+        server_name betting-system.com;
+
+        # SSL 配置
+        ssl_certificate /etc/nginx/ssl/cert.pem;
+        ssl_certificate_key /etc/nginx/ssl/key.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        # API 路由
+        location /api/ {
+            limit_req zone=api_limit burst=20 nodelay;
+            limit_conn conn_limit 10;
+
+            proxy_pass http://betting_api;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache_bypass $http_upgrade;
+
+            # 緩存配置
+            proxy_cache api_cache;
+            proxy_cache_valid 200 1m;
+            proxy_cache_use_stale error timeout invalid_header updating;
+            add_header X-Cache-Status $upstream_cache_status;
+        }
+
+        # WebSocket 路由
+        location /ws/ {
+            proxy_pass http://betting_ws;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 86400;
+        }
+
+        # 認證路由（更嚴格的限制）
+        location /api/auth/ {
+            limit_req zone=auth_limit burst=5 nodelay;
+            limit_conn conn_limit 5;
+
+            proxy_pass http://betting_api;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+
+        # 靜態文件
+        location /static/ {
+            alias /app/static/;
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # 健康檢查
+        location /health {
+            access_log off;
+            proxy_pass http://betting_api/health;
+        }
+    }
+}
+
+---
+# kubernetes/deployment.yaml - Kubernetes 部署配置
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: betting-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: betting-config
+  namespace: betting-system
+data:
+  NODE_ENV: "production"
+  DB_HOST: "timescaledb-service"
+  DB_PORT: "5432"
+  DB_NAME: "betting_db"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  KAFKA_BROKERS: "kafka-service:9092"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: betting-secrets
+  namespace: betting-system
+type: Opaque
+stringData:
+  db-password: "your-secure-db-password"
+  redis-password: "your-secure-redis-password"
+  jwt-secret: "your-secure-jwt-secret"
+  jwt-refresh-secret: "your-secure-jwt-refresh-secret"
+  encryption-key: "your-32-byte-hex-encryption-key"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betting-api
+  namespace: betting-system
+  labels:
+    app: betting-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: betting-api
+  template:
+    metadata:
+      labels:
+        app: betting-api
+    spec:
+      serviceAccountName: betting-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: betting-api
+        image: betting-system/api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+        - containerPort: 8080
+          name: websocket
+        envFrom:
+        - configMapRef:
+            name: betting-config
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: betting-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: betting-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: betting-secrets
+              key: jwt-secret
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: uploads
+          mountPath: /app/uploads
+      volumes:
+      - name: logs
+        emptyDir: {}
+      - name: uploads
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: betting-api-service
+  namespace: betting-system
+spec:
+  selector:
+    app: betting-api
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+  - name: websocket
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: betting-api-hpa
+  namespace: betting-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: betting-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: betting-ingress
+  namespace: betting-system
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/websocket-services: "betting-api-service"
+spec:
+  tls:
+  - hosts:
+    - betting-system.com
+    secretName: betting-tls
+  rules:
+  - host: betting-system.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: betting-api-service
+            port:
+              number: 3000
+      - path: /ws
+        pathType: Prefix
+        backend:
+          service:
+            name: betting-api-service
+            port:
+              number: 8080
