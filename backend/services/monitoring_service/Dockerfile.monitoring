@@ -1,0 +1,18 @@
+# backend/services/monitoring_service/Dockerfile.monitoring
+FROM node:18-alpine AS base
+WORKDIR /app
+RUN apk add --no-cache libc6-compat
+
+FROM base AS deps
+COPY package.json ./
+# If package-lock.json exists, copy it too
+# COPY package-lock.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+FROM base AS production
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
+COPY index.js .
+# RUN addgroup -g 1001 -S nodejs && adduser -S appuser -u 1001
+# USER appuser
+CMD ["node", "index.js"]

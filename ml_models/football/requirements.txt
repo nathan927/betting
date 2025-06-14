@@ -1,0 +1,9 @@
+pandas
+numpy
+pymc3
+theano-pymc # For PyMC3 compatibility, might need to be 'aesara' for newer PyMC versions
+arviz
+redis
+Flask
+gunicorn # For running Flask app in production
+python-dotenv # If using .env for environment variables like REDIS_HOST (implied by process.env)
