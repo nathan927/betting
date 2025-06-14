@@ -1,0 +1,198 @@
+# kubernetes/deployment.yaml - Kubernetes 部署配置
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: betting-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: betting-config
+  namespace: betting-system
+data:
+  NODE_ENV: "production"
+  DB_HOST: "timescaledb-service"
+  DB_PORT: "5432"
+  DB_NAME: "betting_db"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  KAFKA_BROKERS: "kafka-service:9092"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: betting-secrets
+  namespace: betting-system
+type: Opaque
+stringData:
+  db-password: "your-secure-db-password"
+  redis-password: "your-secure-redis-password"
+  jwt-secret: "your-secure-jwt-secret"
+  jwt-refresh-secret: "your-secure-jwt-refresh-secret"
+  encryption-key: "your-32-byte-hex-encryption-key"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betting-api
+  namespace: betting-system
+  labels:
+    app: betting-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: betting-api
+  template:
+    metadata:
+      labels:
+        app: betting-api
+    spec:
+      serviceAccountName: betting-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: betting-api
+        image: betting-system/api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+        - containerPort: 8080
+          name: websocket
+        envFrom:
+        - configMapRef:
+            name: betting-config
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: betting-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: betting-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: betting-secrets
+              key: jwt-secret
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: uploads
+          mountPath: /app/uploads
+      volumes:
+      - name: logs
+        emptyDir: {}
+      - name: uploads
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: betting-api-service
+  namespace: betting-system
+spec:
+  selector:
+    app: betting-api
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+  - name: websocket
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: betting-api-hpa
+  namespace: betting-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: betting-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: betting-ingress
+  namespace: betting-system
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/websocket-services: "betting-api-service"
+spec:
+  tls:
+  - hosts:
+    - betting-system.com
+    secretName: betting-tls
+  rules:
+  - host: betting-system.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: betting-api-service
+            port:
+              number: 3000
+      - path: /ws
+        pathType: Prefix
+        backend:
+          service:
+            name: betting-api-service
+            port:
+              number: 8080

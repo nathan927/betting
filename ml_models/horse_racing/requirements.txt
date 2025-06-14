@@ -1,0 +1,10 @@
+pandas
+numpy
+torch
+scikit-learn
+joblib
+aiohttp
+# Flask might be needed if the service part of the original script was to be used
+Flask
+gunicorn # For Flask
+python-dotenv # Often used with Flask projects for config

@@ -1,0 +1,9 @@
+# ml_models/horse_racing/Dockerfile.ml_horse_racing
+FROM python:3.9-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY predictor.py .
+# Assuming Flask app instance is named 'app' in predictor.py and listening on port 5001
+EXPOSE 5002 # Port 5001 is used by football, changed to 5002 for horse racing, as per predictor.py's Flask app
+CMD ["gunicorn", "--bind", "0.0.0.0:5002", "predictor:app"]
